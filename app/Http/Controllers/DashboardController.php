@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
 
@@ -9,139 +10,75 @@ class DashboardController extends Controller
 {
     public function index()
     {
-        /* =========================================================
-           SECTION A – KPI & LEADERBOARD  (TAB “OVERVIEW”)
-        ========================================================= */
-
-        // ---- KPI ------------------------------------------------
-        $nowAvgIPK   = DB::table('Fact_TranscriptSnap')->avg('IPK') ?: 0;
-        $lastYearAvg = DB::table('Fact_TranscriptSnap')
-                        ->where('Tgl_Cetak','<',Carbon::now()->subYear())
-                        ->avg('IPK') ?: 0;
-
+        // ===================================================================
+        // DATA UNTUK TAB "OVERVIEW"
+        // ===================================================================
         $kpi = [
-            'total_mahasiswa'     => DB::table('Dim_Mahasiswa')->count(),
-            'mahasiswa_aktif'     => DB::table('Dim_Mahasiswa')->where('Status_Mhs','Aktif')->count(),
-            'mahasiswa_mengulang' => DB::table('Fact_Nilai')
-                                        ->select('SK_Mhs','SK_MK')
-                                        ->groupBy('SK_Mhs','SK_MK')
-                                        ->havingRaw('COUNT(*) > 1')
-                                        ->distinct('SK_Mhs')
-                                        ->count('SK_Mhs'),
-            'ipk_rata_rata'       => number_format($nowAvgIPK,2),
-            'ipk_change'          => $nowAvgIPK - $lastYearAvg,   // bisa − atau +
+            'total_mahasiswa'   => DB::table('Dim_Mahasiswa')->count(),
+            'mahasiswa_aktif'   => DB::table('Dim_Mahasiswa')->where('Status_Mhs', 'Aktif')->count(),
+            'ipk_rata_rata'     => number_format(DB::table('Fact_TranscriptSnap')->avg('IPK'), 2),
+            'ipk_tertinggi'     => number_format(DB::table('Fact_TranscriptSnap')->max('IPK'), 2),
+            'ipk_terendah'      => number_format(DB::table('Fact_TranscriptSnap')->min('IPK'), 2),
         ];
 
-        // ---- Leaderboard ----------------------------------------
-        $matkulScores = DB::table('Fact_Nilai as fn')
-            ->join('Dim_MataKuliah as mk','fn.SK_MK','=','mk.SK_MK')
-            ->select('mk.Nama_MK', DB::raw('AVG(fn.Skor) as avg_skor'))
-            ->groupBy('mk.Nama_MK');
-
-        $lastSem = DB::table('Dim_Semester')
-                     ->orderByDesc('NK_Tahun')
-                     ->orderByDesc('NK_Periode')
-                     ->first();
-
-        $leaderboard = [
-            'top_3_mahasiswa' => DB::table('Fact_TranscriptSnap as fts')
-                                   ->join('Dim_Mahasiswa as m','fts.SK_Mhs','=','m.SK_Mhs')
-                                   ->select('m.Nama','fts.IPK')
-                                   ->orderByDesc('fts.IPK')
-                                   ->limit(3)->get(),
-
-            'mahasiswa_ips_tertinggi' => $lastSem
-                ? DB::table('Fact_Nilai as fn')
-                    ->join('Dim_Mahasiswa as m','fn.SK_Mhs','=','m.SK_Mhs')
-                    ->where('fn.SK_Sem',$lastSem->SK_Sem)
-                    ->select('m.Nama', DB::raw('AVG(fn.Skor) as ips'))
-                    ->groupBy('m.SK_Mhs','m.Nama')
-                    ->orderByDesc('ips')
-                    ->first()
-                : null,
-
-            'matkul_termudah'  => (clone $matkulScores)->orderByDesc('avg_skor')->first(),
-            'top_3_matkul_tersulit' => (clone $matkulScores)->orderBy('avg_skor')->limit(3)->get(),
-            'matkul_paling_diulang' => DB::table('Fact_Nilai')
-                                       ->where('Retake_By_Shift',1)
-                                       ->join('Dim_MataKuliah','Fact_Nilai.SK_MK','=','Dim_MataKuliah.SK_MK')
-                                       ->select('Dim_MataKuliah.Nama_MK', DB::raw('COUNT(*) as jumlah_ulang'))
-                                       ->groupBy('Dim_MataKuliah.Nama_MK')
-                                       ->orderByDesc('jumlah_ulang')
-                                       ->first(),
-        ];
-
-        /* =========================================================
-           SECTION B – ANALISIS MENDALAM (TAB 2)
-        ========================================================= */
-
-        // ---- Kepatuhan Kurikulum -------------------------------
-        $compliance = DB::table('Fact_Nilai')
-            ->select('Retake_By_Shift',
-                     DB::raw('AVG(Skor)  as avg_skor'),
-                     DB::raw('COUNT(*)   as cnt'))
-            ->groupBy('Retake_By_Shift')
-            ->pluck('cnt','Retake_By_Shift')
-            ->toArray();      // [0 => xxx, 1 => yyy]
-
-        $tepat  = $compliance[0] ?? 0;
-        $telat  = $compliance[1] ?? 0;
-        $total  = $tepat + $telat;
-
-        $kepatuhan_kurikulum = [
-            'kpi_persentase' => $total ? round($tepat / $total * 100) : 0,
-            'chart_data'     => [
-                 'Tepat Waktu' => $tepat,
-                 'Terlambat'   => $telat,
-            ]
-        ];
-
-        // ---- Korelasi IP ----------------------------------------
-        $korelasi_ip = DB::table('Fact_TranscriptSnap')
-            ->whereNotNull('IP_Persiapan')
-            ->whereNotNull('IP_Sarjana')
-            ->select('IP_Persiapan','IP_Sarjana')
-            ->get()
-            ->map(fn($row)=>[
-                round((float)$row->IP_Persiapan,2),
-                round((float)$row->IP_Sarjana,2)
-            ])->toArray();
-
-        // ---- Mata Kuliah Kritis ---------------------------------
-        $dropouts = DB::table('Dim_Mahasiswa')
-                      ->where('Status_Mhs','Dropout')
-                      ->pluck('SK_Mhs');
-
-        $rateAll = DB::table('Fact_Nilai as fn')
-            ->join('Dim_MataKuliah as mk','fn.SK_MK','=','mk.SK_MK')
-            ->select('mk.Nama_MK',
-                     DB::raw('AVG(fn.Skor<2) as gagal_umum'))
-            ->groupBy('mk.Nama_MK');
-
-        $rateDrop = DB::table('Fact_Nilai as fn')
-            ->join('Dim_MataKuliah as mk','fn.SK_MK','=','mk.SK_MK')
-            ->whereIn('fn.SK_Mhs',$dropouts)
-            ->select('mk.Nama_MK',
-                     DB::raw('AVG(fn.Skor<2) as gagal_dropout'))
-            ->groupBy('mk.Nama_MK');
-
-        $killer_courses = DB::query()
-            ->fromSub($rateDrop,'d')
-            ->joinSub($rateAll,'u','d.Nama_MK','=','u.Nama_MK')
-            ->select('d.Nama_MK','u.gagal_umum','d.gagal_dropout')
-            ->orderByDesc('gagal_dropout')
-            ->limit(5)
+        $peringkat_mahasiswa = DB::table('Fact_TranscriptSnap as fts')
+            ->join('Dim_Mahasiswa as dm', 'fts.SK_Mhs', '=', 'dm.SK_Mhs')
+            ->select('dm.Nama', 'fts.IPK')
+            ->orderBy('fts.IPK', 'desc')
             ->get();
 
-        /* =========================================================
-           SEND TO VIEW
-        ========================================================= */
+        $peringkat_matkul_nilai = DB::table('Fact_Nilai as fn')
+            ->join('Dim_MataKuliah as dmk', 'fn.SK_MK', '=', 'dmk.SK_MK')
+            ->select('dmk.Nama_MK', DB::raw('AVG(fn.Skor) as rata_rata_skor'))
+            ->groupBy('dmk.Nama_MK')
+            ->orderBy('rata_rata_skor', 'asc')
+            ->get();
+
+        // ===================================================================
+        // DATA UNTUK TAB "ANALISIS MENDALAM"
+        // ===================================================================
+
+        // Query 1: Distribusi IPK Terkini
+        $latest_snaps = DB::table('Fact_TranscriptSnap')->select('SK_Mhs', DB::raw('MAX(SK_Snap) as last_snap_id'))->groupBy('SK_Mhs');
+        $distribusi_ipk_raw = DB::table('Fact_TranscriptSnap as fts')
+            ->joinSub($latest_snaps, 'latest', fn($join) => $join->on('fts.SK_Snap', '=', 'latest.last_snap_id'))
+            ->select(DB::raw("CASE WHEN IPK >= 3.5 THEN '4. Cum Laude (3.5 - 4.0)' WHEN IPK >= 3.0 THEN '3. Sangat Memuaskan (3.0 - 3.49)' WHEN IPK >= 2.5 THEN '2. Memuaskan (2.5 - 2.99)' ELSE '1. Perlu Perhatian (< 2.5)' END as rentang_ipk"), DB::raw('COUNT(*) as jumlah_mahasiswa'))
+            ->groupBy('rentang_ipk')->orderBy('rentang_ipk', 'asc')->get();
+        $chart_distribusi_ipk = [
+            'labels' => $distribusi_ipk_raw->pluck('rentang_ipk')->map(fn($l) => substr($l, 3)),
+            'data'   => $distribusi_ipk_raw->pluck('jumlah_mahasiswa'),
+        ];
+
+        // Query 2: Retake Leaderboard
+        $retake_subquery = DB::table('Fact_Nilai')->select('SK_MK', 'SK_Mhs')->groupBy('SK_MK', 'SK_Mhs')->having(DB::raw('COUNT(*)'), '>', 1);
+        $retake_leaderboard = DB::table('Dim_MataKuliah as dmk')
+            ->joinSub($retake_subquery, 'retakes', 'dmk.SK_MK', '=', 'retakes.SK_MK')
+            ->select('dmk.Nama_MK', DB::raw('COUNT(*) as jumlah_ulang'))
+            ->groupBy('dmk.Nama_MK')->orderBy('jumlah_ulang', 'desc')->limit(10)->get();
+
+        // Query 3: Trend Rata-rata IPS per Semester
+        $trend_ips_raw = DB::table('Fact_Nilai as fn')
+            ->join('Dim_Semester as ds', 'fn.SK_Sem', '=', 'ds.SK_Sem')
+            ->select(DB::raw("CONCAT(ds.NK_Tahun, '-', ds.NK_Periode) as semester"), DB::raw("AVG(fn.Skor) as rata_rata_ips"))
+            ->groupBy('semester')->orderBy('semester', 'asc')->get();
+        $chart_trend_ips = [
+            'labels' => $trend_ips_raw->pluck('semester'),
+            'data'   => $trend_ips_raw->pluck('rata_rata_ips')->map(fn($val) => round($val, 2)),
+        ];
+
+        // Query 4: Credit Completion Funnel
+        $credit_funnel_raw = DB::table('Fact_TranscriptSnap as fts')
+            ->joinSub($latest_snaps, 'latest', fn($join) => $join->on('fts.SK_Snap', '=', 'latest.last_snap_id'))
+            ->select(DB::raw("CASE WHEN SKS_Lulus >= 120 THEN '4. Siap Lulus (>= 120 SKS)' WHEN SKS_Lulus >= 80  THEN '3. Tahap Akhir (80-119 SKS)' WHEN SKS_Lulus >= 40  THEN '2. Tahap Menengah (40-79 SKS)' ELSE '1. Tahap Awal (0-39 SKS)' END as rentang_sks"), DB::raw('COUNT(*) as jumlah_mahasiswa'))
+            ->groupBy('rentang_sks')->orderBy('rentang_sks', 'asc')->get();
+        $credit_funnel = [
+            'labels' => $credit_funnel_raw->pluck('rentang_sks')->map(fn($l) => substr($l, 3)),
+            'data'   => $credit_funnel_raw->pluck('jumlah_mahasiswa'),
+        ];
+
         return view('dashboard', compact(
-            'kpi',
-            'leaderboard',
-            'kepatuhan_kurikulum',
-            'korelasi_ip',
-            'killer_courses'
+            'kpi', 'peringkat_mahasiswa', 'peringkat_matkul_nilai',
+            'chart_distribusi_ipk', 'retake_leaderboard', 'chart_trend_ips', 'credit_funnel'
         ));
     }
 }
